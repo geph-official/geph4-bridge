@@ -1,0 +1,37 @@
+[package]
+name = "geph4-bridge"
+version = "0.1.0"
+authors = ["nullchinchilla <nullchinchilla@pm.me>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.42"
+smol = "1.2.5"
+log = "0.4.14"
+env_logger = "0.8.4"
+structopt = "0.3.22"
+x25519-dalek={ version = "1.1.1", features = ["serde"] }
+ed25519-dalek={ version = "1.0.1", features = ["serde"] }
+# binder_transport = {path="../lib/binder_transport"}
+bincode = "1.3.3" 
+hex = "0.4.3"
+# socksv5 = "0.2.0"
+# sosistab={path="../lib/sosistab"}
+serde = "1.0.127"
+blake3 = "0.3.8"
+ureq = "1.5.5"
+flume = "0.10.7"
+once_cell= "1.8.0"
+fastrand= "1.5.0"
+# aioutils={path="../lib/aioutils"}
+smolscale= "0.3.11"
+bimap= "0.6.1"
+by_address= "1.0.4"
+parking_lot= "0.11.1"
+nix= "0.22.0"
+smallvec= "1.6.1"
+async-dup= "1.2.2"
+geph4-aioutils = "0.1.1"
+geph4-binder-transport = "0.1.1"
