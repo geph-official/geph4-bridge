@@ -6,7 +6,7 @@ use smol::{
 };
 use std::{net::SocketAddr, sync::Arc};
 
-use crate::{mmsg::recv_from_many, nat::NatTable, run_command, AsyncUdpSocket};
+use crate::{nat::NatTable, run_command, AsyncUdpSocket};
 
 /// A RAII struct that represents a port forwarder
 pub struct Forwarder {
@@ -134,17 +134,14 @@ async fn udp_forward_downstream(
     local_udp: AsyncUdpSocket,
     remote_udp: AsyncUdpSocket,
 ) {
-    let mut bufs = [[0u8; 2048]; 128];
-    let mut bufs: Vec<&mut [u8]> = bufs.iter_mut().map(|f| f.as_mut()).collect();
+    let mut buf = [0u8; 2048];
     loop {
-        match recv_from_many(&remote_udp, &mut bufs).await {
+        match remote_udp.recv(&mut buf).await {
             Err(err) => {
                 log::error!("error in downstream {:?}", err)
             }
-            Ok(nn) => {
-                for ((n, _), buf) in nn.into_iter().zip(bufs.iter()) {
-                    let _ = local_udp.send_to(&buf[..n], client_addr).await;
-                }
+            Ok(n) => {
+                let _ = local_udp.send_to(&buf[..n], client_addr).await;
             }
         }
     }
