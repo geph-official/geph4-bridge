@@ -1,8 +1,11 @@
 [package]
 name = "geph4-bridge"
 version = "0.1.0"
-authors = ["nullchinchilla <nullchinchilla@pm.me>"]
+authors = ["nullchinchilla <nullchinchilla@pm.me>", "Geph Project <contact@geph.io"]
 edition = "2018"
+description="Bridge node for Geph"
+license="GPL-3.0-only"
+repository="https://github.com/geph-official/geph4-bridge"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
