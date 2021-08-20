@@ -95,16 +95,12 @@ async fn bridge_loop<'a>(
             for exit in exits {
                 if current_exits.get(&exit.hostname).is_none() {
                     log::info!("{} is a new exit, spawning new managers!", exit.hostname);
-                    let task = (0..if iptables { 16 } else { 1 })
-                        .map(|_| {
-                            smolscale::spawn(manage_exit(
-                                exit.clone(),
-                                bridge_secret.to_string(),
-                                bridge_group.to_string(),
-                                iptables,
-                            ))
-                        })
-                        .collect::<Vec<_>>();
+                    let task = smolscale::spawn(manage_exit(
+                        exit.clone(),
+                        bridge_secret.to_string(),
+                        bridge_group.to_string(),
+                        iptables,
+                    ));
                     current_exits.insert(exit.hostname, task);
                 }
             }
@@ -119,17 +115,38 @@ async fn manage_exit(
     bridge_secret: String,
     bridge_group: String,
     iptables: bool,
+) {
+    loop {
+        if let Err(err) = manage_exit_inner(
+            exit.clone(),
+            bridge_secret.clone(),
+            bridge_group.clone(),
+            iptables,
+        )
+        .await
+        {
+            log::error!("manage_exit_inner: {:?}", err)
+        }
+    }
+}
+
+async fn manage_exit_inner(
+    exit: ExitDescriptor,
+    bridge_secret: String,
+    bridge_group: String,
+    iptables: bool,
 ) -> anyhow::Result<()> {
     let (local_udp, local_tcp) = std::iter::from_fn(|| Some(fastrand::u32(1000..65536)))
         .find_map(|port| {
+            log::warn!("trying port {}", port);
             Some((
                 async_dup::Arc::new(
                     Async::<std::net::UdpSocket>::bind(
-                        format!("[::0]:{}", port).parse::<SocketAddr>().unwrap(),
+                        format!("0.0.0.0:{}", port).parse::<SocketAddr>().unwrap(),
                     )
                     .ok()?,
                 ),
-                smol::future::block_on(TcpListener::bind(format!("[::0]:{}", port))).ok()?,
+                smol::future::block_on(TcpListener::bind(format!("0.0.0.0:{}", port))).ok()?,
             ))
         })
         .unwrap();
@@ -219,12 +236,12 @@ async fn manage_exit_once(
         // receive route
         let (port, sosistab_pk): (u16, x25519_dalek::PublicKey) =
             geph4_aioutils::read_pascalish(&mut conn).await?;
-        log::info!(
-            "route at {} is {}/{}",
-            exit.hostname,
-            port,
-            hex::encode(sosistab_pk.as_bytes())
-        );
+        // log::info!(
+        //     "route at {} is {}/{}",
+        //     exit.hostname,
+        //     port,
+        //     hex::encode(sosistab_pk.as_bytes())
+        // );
         // update route
         route_update.send_async((port, sosistab_pk)).await?;
         smol::Timer::after(Duration::from_secs(30)).await;

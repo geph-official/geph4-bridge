@@ -103,7 +103,7 @@ async fn udp_forward(local_udp: AsyncUdpSocket, remote_addr: SocketAddr) {
                     .take(100000)
                     .find_map(|port| {
                         Async::<std::net::UdpSocket>::bind(
-                            format!("[::0]:{}", port).parse::<SocketAddr>().unwrap(),
+                            format!("0.0.0.0:{}", port).parse::<SocketAddr>().unwrap(),
                         )
                         .ok()
                     })
