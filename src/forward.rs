@@ -88,7 +88,7 @@ async fn tcp_forward(local_tcp: TcpListener, remote_addr: SocketAddr) {
 
 // the tricky part: UDP natting
 async fn udp_forward(local_udp: AsyncUdpSocket, remote_addr: SocketAddr) {
-    let mut nat_table: NatTable<ByAddress<Arc<NatEntry>>> = NatTable::new(3000);
+    let mut nat_table: NatTable<ByAddress<Arc<NatEntry>>> = NatTable::new(1000);
     let mut buf = [0u8; 2048];
     loop {
         let (n, client_addr) = local_udp

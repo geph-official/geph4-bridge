@@ -7,6 +7,7 @@ use std::{
     sync::Arc,
 };
 
+use anyhow::Context;
 use env_logger::Env;
 use geph4_binder_transport::{BinderClient, BinderRequestData, BinderResponse, ExitDescriptor};
 use once_cell::sync::Lazy;
@@ -50,12 +51,8 @@ fn main() -> anyhow::Result<()> {
         if opt.iptables {
             run_command("iptables -t nat -F");
             // --random to not leak origin ports
-            run_command(
-            "iptables -t nat -A POSTROUTING -j MASQUERADE -p udp --random-fully --to-ports 1000-65000",
-        );
-            run_command(
-            "iptables -t nat -A POSTROUTING -j MASQUERADE -p tcp --random-fully --to-ports 1000-65000",
-        );
+            run_command("iptables -t nat -A POSTROUTING -j MASQUERADE -p udp --random-fully");
+            run_command("iptables -t nat -A POSTROUTING -j MASQUERADE -p tcp --random-fully");
         }
         // set TTL to 200 to hide distance of clients
         // run_command("iptables -t mangle -I POSTROUTING -j TTL --ttl-set 200");
@@ -95,12 +92,17 @@ async fn bridge_loop<'a>(
             for exit in exits {
                 if current_exits.get(&exit.hostname).is_none() {
                     log::info!("{} is a new exit, spawning new managers!", exit.hostname);
-                    let task = smolscale::spawn(manage_exit(
-                        exit.clone(),
-                        bridge_secret.to_string(),
-                        bridge_group.to_string(),
-                        iptables,
-                    ));
+                    let exit2 = exit.clone();
+                    let task = (0..=8)
+                        .map(move |_| {
+                            smolscale::spawn(manage_exit(
+                                exit2.clone(),
+                                bridge_secret.to_string(),
+                                bridge_group.to_string(),
+                                iptables,
+                            ))
+                        })
+                        .collect::<Vec<_>>();
                     current_exits.insert(exit.hostname, task);
                 }
             }
@@ -167,7 +169,11 @@ async fn manage_exit_inner(
             )
             .await
             {
-                log::warn!("restarting manage_exit_once: {}", err);
+                log::warn!(
+                    "restarting manage_exit_once for {}: {:?}",
+                    exit.hostname,
+                    err
+                );
             }
         }
     };
@@ -222,7 +228,9 @@ async fn manage_exit_once(
 ) -> anyhow::Result<()> {
     // get my ip address
     my_addr.set_ip(*MY_IP);
-    let mut conn = smol::net::TcpStream::connect(&format!("{}:28080", exit.hostname)).await?;
+    let mut conn = smol::net::TcpStream::connect(&format!("{}:28080", exit.hostname))
+        .await
+        .context("cannot connect to control port")?;
     // first read the challenge string
     let mut challenge_string = [0u8; 32];
     conn.read_exact(&mut challenge_string).await?;
