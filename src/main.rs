@@ -1,3 +1,4 @@
+mod autoupdate;
 mod forward;
 mod nat;
 
@@ -45,6 +46,8 @@ struct Opt {
 }
 
 fn main() -> anyhow::Result<()> {
+    // start the autoupdate thread
+    std::thread::spawn(autoupdate::autoupdate);
     smol::block_on(async move {
         let opt: Opt = Opt::from_args();
         env_logger::Builder::from_env(Env::default().default_filter_or("geph4_bridge")).init();
@@ -93,7 +96,7 @@ async fn bridge_loop<'a>(
                 if current_exits.get(&exit.hostname).is_none() {
                     log::info!("{} is a new exit, spawning new managers!", exit.hostname);
                     let exit2 = exit.clone();
-                    let task = (0..=8)
+                    let task = (0..=6)
                         .map(move |_| {
                             smolscale::spawn(manage_exit(
                                 exit2.clone(),

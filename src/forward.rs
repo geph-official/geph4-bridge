@@ -100,7 +100,7 @@ async fn udp_forward(local_udp: AsyncUdpSocket, remote_addr: SocketAddr) {
             // bind everything now
             let newly_bound = async_dup::Arc::new(
                 std::iter::from_fn(|| Some(fastrand::u32(1000..65536)))
-                    .take(100000)
+                    .take(10000)
                     .find_map(|port| {
                         Async::<std::net::UdpSocket>::bind(
                             format!("0.0.0.0:{}", port).parse::<SocketAddr>().unwrap(),
@@ -141,7 +141,7 @@ async fn udp_forward_downstream(
                 log::error!("error in downstream {:?}", err)
             }
             Ok(n) => {
-                let _ = local_udp.send_to(&buf[..n], client_addr).await;
+                local_udp.send_to(&buf[..n], client_addr).await.unwrap();
             }
         }
     }
