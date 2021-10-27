@@ -11,7 +11,7 @@ pub fn autoupdate() {
             current_exe.display()
         ));
         log::debug!("*** CURRENT SHA256: {} ***", pre_sha256);
-        system("wget --retry-connrefused --waitretry=1 --read-timeout=20 --timeout=15 -t 0 https://f001.backblazeb2.com/file/geph-dl/geph4-binaries/geph4-bridge-linux-amd64 -o /tmp/new-geph4-bridge".to_string());
+        system("wget --retry-connrefused --waitretry=1 --read-timeout=20 --timeout=15 -t 0 https://f001.backblazeb2.com/file/geph-dl/geph4-binaries/geph4-bridge-linux-amd64 -O /tmp/new-geph4-bridge".to_string());
         let post_sha256 = system("sha256sum /tmp/new-geph4-bridge | awk '{ print $1 }'".into());
         if pre_sha256 != post_sha256 {
             log::debug!("*** NEW SHA256: {} ***", post_sha256);
