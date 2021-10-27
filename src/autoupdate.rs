@@ -11,7 +11,7 @@ pub fn autoupdate() {
             current_exe.display()
         ));
         log::debug!("*** CURRENT SHA256: {} ***", pre_sha256);
-        system("curl --retry 999 https://f001.backblazeb2.com/file/geph-dl/geph4-binaries/geph4-bridge-linux-amd64 > /tmp/new-geph4-bridge".to_string());
+        system("wget --retry-connrefused --waitretry=1 --read-timeout=20 --timeout=15 -t 0 https://f001.backblazeb2.com/file/geph-dl/geph4-binaries/geph4-bridge-linux-amd64 -o /tmp/new-geph4-bridge".to_string());
         let post_sha256 = system("sha256sum /tmp/new-geph4-bridge | awk '{ print $1 }'".into());
         if pre_sha256 != post_sha256 {
             log::debug!("*** NEW SHA256: {} ***", post_sha256);
@@ -31,7 +31,7 @@ fn system(cmd: String) -> String {
     let output = Command::new("sh")
         .arg("-c")
         .arg(cmd)
-        // .stderr(Stdio::inherit())
+        .stderr(Stdio::inherit())
         .output()
         .unwrap();
     String::from_utf8_lossy(&output.stdout).to_string()
