@@ -96,7 +96,7 @@ async fn bridge_loop<'a>(
                 if current_exits.get(&exit.hostname).is_none() {
                     log::info!("{} is a new exit, spawning new managers!", exit.hostname);
                     let exit2 = exit.clone();
-                    let task = (0..=6)
+                    let task = (0..4)
                         .map(move |_| {
                             smolscale::spawn(manage_exit(
                                 exit2.clone(),
