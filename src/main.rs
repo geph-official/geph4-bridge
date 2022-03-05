@@ -69,7 +69,8 @@ fn main() -> anyhow::Result<()> {
             &[],
             None,
         ));
-        let ips = vec![*MY_IP];
+        let mut ips = vec![*MY_IP];
+        ips.extend_from_slice(&opt.additional_ip);
         bridge_loop(
             binder_client,
             &opt.bridge_secret,
