@@ -39,6 +39,7 @@ async-dup= "1.2.2"
 geph4-aioutils = "0.1.1"
 geph4-binder-transport = "0.1.1"
 tap = "1.0.1"
+cached = "0.33.0"
 
 [profile.release]
 panic = "abort"

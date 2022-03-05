@@ -4,7 +4,7 @@ mod nat;
 
 use std::{
     collections::HashMap,
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::Arc,
 };
 
@@ -43,6 +43,10 @@ struct Opt {
     /// whether or not to use iptables for kernel-level forwarding
     #[structopt(long)]
     iptables: bool,
+
+    /// additional IP addresses
+    #[structopt(long)]
+    additional_ip: Vec<Ipv4Addr>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -65,11 +69,13 @@ fn main() -> anyhow::Result<()> {
             &[],
             None,
         ));
+        let ips = vec![*MY_IP];
         bridge_loop(
             binder_client,
             &opt.bridge_secret,
             &opt.bridge_group,
             opt.iptables,
+            ips,
         )
         .await;
         Ok(())
@@ -84,6 +90,7 @@ async fn bridge_loop<'a>(
     bridge_secret: &'a str,
     bridge_group: &'a str,
     iptables: bool,
+    ips: Vec<Ipv4Addr>,
 ) {
     let mut current_exits = HashMap::new();
     loop {
@@ -96,13 +103,16 @@ async fn bridge_loop<'a>(
                 if current_exits.get(&exit.hostname).is_none() {
                     log::info!("{} is a new exit, spawning new managers!", exit.hostname);
                     let exit2 = exit.clone();
-                    let task = (0..4)
-                        .map(move |_| {
+                    let task = ips
+                        .iter()
+                        .cloned()
+                        .map(move |ip| {
                             smolscale::spawn(manage_exit(
                                 exit2.clone(),
                                 bridge_secret.to_string(),
                                 bridge_group.to_string(),
                                 iptables,
+                                ip,
                             ))
                         })
                         .collect::<Vec<_>>();
@@ -120,6 +130,7 @@ async fn manage_exit(
     bridge_secret: String,
     bridge_group: String,
     iptables: bool,
+    ip: Ipv4Addr,
 ) {
     loop {
         if let Err(err) = manage_exit_inner(
@@ -127,6 +138,7 @@ async fn manage_exit(
             bridge_secret.clone(),
             bridge_group.clone(),
             iptables,
+            ip,
         )
         .await
         {
@@ -140,6 +152,7 @@ async fn manage_exit_inner(
     bridge_secret: String,
     bridge_group: String,
     iptables: bool,
+    ip: Ipv4Addr,
 ) -> anyhow::Result<()> {
     let (local_udp, local_tcp) = std::iter::from_fn(|| Some(fastrand::u32(1000..65536)))
         .find_map(|port| {
@@ -163,14 +176,10 @@ async fn manage_exit_inner(
     let (send_routes, recv_routes) = flume::bounded(0);
     let manage_fut = async {
         loop {
-            if let Err(err) = manage_exit_once(
-                &exit,
-                &bridge_secret,
-                &bridge_group,
-                local_udp.get_ref().local_addr().unwrap(),
-                &send_routes,
-            )
-            .await
+            let mut saddr = local_udp.get_ref().local_addr().unwrap();
+            saddr.set_ip(ip.into());
+            if let Err(err) =
+                manage_exit_once(&exit, &bridge_secret, &bridge_group, saddr, &send_routes).await
             {
                 log::warn!(
                     "restarting manage_exit_once for {}: {:?}",
@@ -211,7 +220,7 @@ fn run_command(s: &str) {
         .unwrap();
 }
 
-static MY_IP: Lazy<IpAddr> = Lazy::new(|| {
+static MY_IP: Lazy<Ipv4Addr> = Lazy::new(|| {
     ureq::get("http://checkip.amazonaws.com/")
         .call()
         .into_string()
@@ -222,18 +231,22 @@ static MY_IP: Lazy<IpAddr> = Lazy::new(|| {
         .unwrap()
 });
 
+#[cached::proc_macro::cached(result = true)]
+async fn resolve(string: String) -> anyhow::Result<Vec<SocketAddr>> {
+    Ok(smol::net::resolve(string).await?)
+}
+
 async fn manage_exit_once(
     exit: &ExitDescriptor,
     bridge_secret: &str,
     bridge_group: &str,
-    mut my_addr: SocketAddr,
+    my_addr: SocketAddr,
     route_update: &flume::Sender<(u16, x25519_dalek::PublicKey)>,
 ) -> anyhow::Result<()> {
-    // get my ip address
-    my_addr.set_ip(*MY_IP);
-    let mut conn = smol::net::TcpStream::connect(&format!("{}:28080", exit.hostname))
-        .await
-        .context("cannot connect to control port")?;
+    let mut conn =
+        smol::net::TcpStream::connect(resolve(format!("{}:28080", exit.hostname)).await?[0])
+            .await
+            .context("cannot connect to control port")?;
     // first read the challenge string
     let mut challenge_string = [0u8; 32];
     conn.read_exact(&mut challenge_string).await?;
