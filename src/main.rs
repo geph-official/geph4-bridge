@@ -196,8 +196,7 @@ async fn manage_exit_inner(
         let mut last_remote_port = 0;
         loop {
             let (remote_port, _) = recv_routes.recv_async().await?;
-            let remote_addr =
-                smol::net::resolve(&format!("{}:{}", exit.hostname, remote_port)).await?[0];
+            let remote_addr = resolve(format!("{}:{}", exit.hostname, remote_port)).await?[0];
             if remote_port != last_remote_port {
                 last_remote_port = remote_port;
                 forwarder.replace(Forwarder::new(
