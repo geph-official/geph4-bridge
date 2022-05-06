@@ -10,36 +10,36 @@ repository="https://github.com/geph-official/geph4-bridge"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-anyhow = "1.0.42"
+anyhow = "1.0.57"
 smol = "1.2.5"
-log = "0.4.14"
-env_logger = "0.8.4"
-structopt = "0.3.22"
-x25519-dalek={ version = "1.1.1", features = ["serde"] }
+log = "0.4.17"
+env_logger = "0.9.0"
+structopt = "0.3.26"
+x25519-dalek={ version = "1.2.0", features = ["serde"] }
 ed25519-dalek={ version = "1.0.1", features = ["serde"] }
 # binder_transport = {path="../lib/binder_transport"}
-bincode = "1.3.3" 
+bincode = "1.3.3"
 hex = "0.4.3"
 # socksv5 = "0.2.0"
 # sosistab={path="../lib/sosistab"}
-serde = "1.0.127"
-blake3 = "0.3.8"
-ureq = "1.5.5"
-flume = "0.10.7"
-once_cell= "1.8.0"
-fastrand= "1.5.0"
+serde = "1.0.137"
+blake3 = "1.3.1"
+ureq = "2.4.0"
+flume = "0.10.12"
+once_cell= "1.10.0"
+fastrand= "1.7.0"
 # aioutils={path="../lib/aioutils"}
-smolscale= "0.3.11"
-bimap= "0.6.1"
+smolscale= "0.3.23"
+bimap= "0.6.2"
 by_address= "1.0.4"
-parking_lot= "0.11.1"
-nix= "0.22.0"
-smallvec= "1.6.1"
+parking_lot= "0.12.0"
+nix= "0.24.1"
+smallvec= "1.8.0"
 async-dup= "1.2.2"
-geph4-aioutils = "0.1.1"
-geph4-binder-transport = "0.1.1"
+geph4-aioutils = "0.1.3"
+geph4-binder-transport = "0.2.0"
 tap = "1.0.1"
-cached = "0.33.0"
+cached = "0.34.0"
 
 [profile.release]
 panic = "abort"

@@ -4,14 +4,14 @@ mod nat;
 
 use std::{
     collections::HashMap,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{Ipv4Addr, SocketAddr},
     sync::Arc,
 };
 
 use anyhow::Context;
 use env_logger::Env;
 use geph4_binder_transport::{BinderClient, BinderRequestData, BinderResponse, ExitDescriptor};
-use once_cell::sync::Lazy;
+
 use smol::{net::TcpListener, prelude::*, Async};
 use std::time::Duration;
 use structopt::StructOpt;
@@ -43,10 +43,9 @@ struct Opt {
     /// whether or not to use iptables for kernel-level forwarding
     #[structopt(long)]
     iptables: bool,
-
-    /// additional IP addresses
-    #[structopt(long)]
-    additional_ip: Vec<Ipv4Addr>,
+    // /// additional IP addresses
+    // #[structopt(long)]
+    // additional_ip: Vec<Ipv4Addr>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -69,14 +68,11 @@ fn main() -> anyhow::Result<()> {
             &[],
             None,
         ));
-        let mut ips = vec![*MY_IP];
-        ips.extend_from_slice(&opt.additional_ip);
         bridge_loop(
             binder_client,
             &opt.bridge_secret,
             &opt.bridge_group,
             opt.iptables,
-            ips,
         )
         .await;
         Ok(())
@@ -91,7 +87,6 @@ async fn bridge_loop<'a>(
     bridge_secret: &'a str,
     bridge_group: &'a str,
     iptables: bool,
-    ips: Vec<Ipv4Addr>,
 ) {
     let mut current_exits = HashMap::new();
     loop {
@@ -104,19 +99,12 @@ async fn bridge_loop<'a>(
                 if current_exits.get(&exit.hostname).is_none() {
                     log::info!("{} is a new exit, spawning new managers!", exit.hostname);
                     let exit2 = exit.clone();
-                    let task = ips
-                        .iter()
-                        .cloned()
-                        .map(move |ip| {
-                            smolscale::spawn(manage_exit(
-                                exit2.clone(),
-                                bridge_secret.to_string(),
-                                bridge_group.to_string(),
-                                iptables,
-                                ip,
-                            ))
-                        })
-                        .collect::<Vec<_>>();
+                    let task = smolscale::spawn(manage_exit(
+                        exit2.clone(),
+                        bridge_secret.to_string(),
+                        bridge_group.to_string(),
+                        iptables,
+                    ));
                     current_exits.insert(exit.hostname, task);
                 }
             }
@@ -131,7 +119,6 @@ async fn manage_exit(
     bridge_secret: String,
     bridge_group: String,
     iptables: bool,
-    ip: Ipv4Addr,
 ) {
     loop {
         if let Err(err) = manage_exit_inner(
@@ -139,7 +126,6 @@ async fn manage_exit(
             bridge_secret.clone(),
             bridge_group.clone(),
             iptables,
-            ip,
         )
         .await
         {
@@ -153,8 +139,8 @@ async fn manage_exit_inner(
     bridge_secret: String,
     bridge_group: String,
     iptables: bool,
-    ip: Ipv4Addr,
 ) -> anyhow::Result<()> {
+    let ip = get_ip().await?;
     let (local_udp, local_tcp) = std::iter::from_fn(|| Some(fastrand::u32(1000..65536)))
         .find_map(|port| {
             log::warn!("trying port {}", port);
@@ -220,16 +206,18 @@ fn run_command(s: &str) {
         .unwrap();
 }
 
-static MY_IP: Lazy<Ipv4Addr> = Lazy::new(|| {
-    ureq::get("http://checkip.amazonaws.com/")
-        .call()
-        .into_string()
-        .unwrap()
-        .trim()
-        .to_string()
-        .parse()
-        .unwrap()
-});
+async fn get_ip() -> anyhow::Result<Ipv4Addr> {
+    smol::unblock(|| {
+        Ok(ureq::get("http://checkip.amazonaws.com/")
+            .timeout(Duration::from_secs(1))
+            .call()?
+            .into_string()?
+            .trim()
+            .to_string()
+            .parse()?)
+    })
+    .await
+}
 
 #[cached::proc_macro::cached(result = true)]
 async fn resolve(string: String) -> anyhow::Result<Vec<SocketAddr>> {
