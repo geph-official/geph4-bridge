@@ -9,10 +9,16 @@ use std::{
 };
 
 use anyhow::Context;
+use async_compat::CompatExt;
 use env_logger::Env;
 use geph4_binder_transport::{BinderClient, BinderRequestData, BinderResponse, ExitDescriptor};
 
-use smol::{net::TcpListener, prelude::*, Async};
+use smol::{
+    net::{TcpListener, TcpStream},
+    prelude::*,
+    Async,
+};
+use smol_timeout::TimeoutExt;
 use std::time::Duration;
 use structopt::StructOpt;
 type AsyncUdpSocket = async_dup::Arc<Async<std::net::UdpSocket>>;
@@ -21,7 +27,7 @@ use crate::forward::Forwarder;
 
 #[derive(Debug, StructOpt)]
 struct Opt {
-    #[structopt(long, default_value = "http://binder-v4.geph.io:8964")]
+    #[structopt(long, default_value = "https://binder-v4.geph.io")]
     /// HTTP(S) address of the binder
     binder_http: String,
 
@@ -48,17 +54,30 @@ struct Opt {
     // additional_ip: Vec<Ipv4Addr>,
 }
 
-fn main() -> anyhow::Result<()> {
+async fn panic_if_gfw() {
+    TcpStream::connect("10010.com:80")
+        .timeout(Duration::from_secs(10))
+        .await
+        .context("timeout")
+        .expect("GFW test failed from timeout")
+        .expect("GFW test failed for other reason");
+    log::debug!("Not gfwed...");
+}
+
+fn main() {
+    let opt: Opt = Opt::from_args();
     // start the autoupdate thread
     std::thread::spawn(autoupdate::autoupdate);
+
     smol::block_on(async move {
-        let opt: Opt = Opt::from_args();
+        // check for GFW
+        panic_if_gfw().compat().await;
         env_logger::Builder::from_env(Env::default().default_filter_or("geph4_bridge")).init();
         if opt.iptables {
             run_command("iptables -t nat -F");
             // --random to not leak origin ports
-            run_command("iptables -t nat -A POSTROUTING -j MASQUERADE -p udp --random-fully");
-            run_command("iptables -t nat -A POSTROUTING -j MASQUERADE -p tcp --random-fully");
+            run_command("iptables -t nat -A POSTROUTING -j MASQUERADE -p udp --random");
+            run_command("iptables -t nat -A POSTROUTING -j MASQUERADE -p tcp");
         }
         // set TTL to 200 to hide distance of clients
         // run_command("iptables -t mangle -I POSTROUTING -j TTL --ttl-set 200");
@@ -75,8 +94,9 @@ fn main() -> anyhow::Result<()> {
             opt.iptables,
         )
         .await;
-        Ok(())
+        anyhow::Ok(())
     })
+    .unwrap()
 }
 
 /// Main loop of the bridge.
@@ -219,7 +239,7 @@ async fn get_ip() -> anyhow::Result<Ipv4Addr> {
     .await
 }
 
-#[cached::proc_macro::cached(result = true)]
+#[cached::proc_macro::cached(result = true, time = 60)]
 async fn resolve(string: String) -> anyhow::Result<Vec<SocketAddr>> {
     Ok(smol::net::resolve(string).await?)
 }
