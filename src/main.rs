@@ -3,27 +3,30 @@ mod forward;
 mod nat;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     net::{Ipv4Addr, SocketAddr},
     sync::Arc,
 };
 
 use anyhow::Context;
+
 use async_compat::CompatExt;
 use env_logger::Env;
 use geph4_binder_transport::{BinderClient, BinderRequestData, BinderResponse, ExitDescriptor};
 
+use geph4_protocol::bridge_exit::BridgeExitTransport;
+
+use once_cell::sync::Lazy;
 use smol::{
-    net::{TcpListener, TcpStream},
-    prelude::*,
-    Async,
+    future::FutureExt,
+    net::{TcpListener, TcpStream, UdpSocket},
 };
 use smol_timeout::TimeoutExt;
 use std::time::Duration;
 use structopt::StructOpt;
-type AsyncUdpSocket = async_dup::Arc<Async<std::net::UdpSocket>>;
 
 use crate::forward::Forwarder;
+use geph4_protocol::bridge_exit::{BridgeExitClient, LegacyProtocol};
 
 #[derive(Debug, StructOpt)]
 struct Opt {
@@ -75,12 +78,13 @@ fn main() {
         env_logger::Builder::from_env(Env::default().default_filter_or("geph4_bridge")).init();
         if opt.iptables {
             run_command("iptables -t nat -F");
+            run_command("iptables -t mangle -F");
             // --random to not leak origin ports
-            run_command("iptables -t nat -A POSTROUTING -j MASQUERADE -p udp --random");
-            run_command("iptables -t nat -A POSTROUTING -j MASQUERADE -p tcp");
+            run_command("iptables -t nat -A POSTROUTING -j MASQUERADE -p udp --random-fully");
+            run_command("iptables -t nat -A POSTROUTING -j MASQUERADE -p tcp --random-fully");
         }
-        // set TTL to 200 to hide distance of clients
-        // run_command("iptables -t mangle -I POSTROUTING -j TTL --ttl-set 200");
+        // // set TTL to hide distance between this and the exit in order to be better obfuscate
+        run_command("iptables -t mangle -p udp -I POSTROUTING -j TTL --ttl-set 64");
         let binder_client = Arc::new(geph4_binder_transport::HttpClient::new(
             bincode::deserialize(&hex::decode(opt.binder_master_pk)?)?,
             opt.binder_http,
@@ -115,6 +119,8 @@ async fn bridge_loop<'a>(
         if let Ok(BinderResponse::GetExitsResp(exits)) = exits {
             log::info!("got {} exits!", exits.len());
             // insert all exits that aren't in current exit
+            let binder_exits: HashSet<_> = exits.iter().map(|e| e.hostname.to_string()).collect();
+            current_exits.retain(|k, _| binder_exits.contains(k));
             for exit in exits {
                 if current_exits.get(&exit.hostname).is_none() {
                     log::info!("{} is a new exit, spawning new managers!", exit.hostname);
@@ -141,14 +147,19 @@ async fn manage_exit(
     iptables: bool,
 ) {
     loop {
-        if let Err(err) = manage_exit_inner(
+        let v1 = manage_exit_inner(
             exit.clone(),
             bridge_secret.clone(),
             bridge_group.clone(),
             iptables,
-        )
-        .await
-        {
+        );
+        let v2 = manage_exit_inner_v2(
+            exit.clone(),
+            bridge_secret.clone(),
+            bridge_group.clone(),
+            iptables,
+        );
+        if let Err(err) = v1.race(v2).await {
             log::error!("manage_exit_inner: {:?}", err)
         }
     }
@@ -160,17 +171,15 @@ async fn manage_exit_inner(
     bridge_group: String,
     iptables: bool,
 ) -> anyhow::Result<()> {
-    let ip = get_ip().await?;
+    let exit_addr = resolve(format!("{}:28080", exit.hostname)).await?[0];
     let (local_udp, local_tcp) = std::iter::from_fn(|| Some(fastrand::u32(1000..65536)))
         .find_map(|port| {
             log::warn!("trying port {}", port);
             Some((
-                async_dup::Arc::new(
-                    Async::<std::net::UdpSocket>::bind(
-                        format!("0.0.0.0:{}", port).parse::<SocketAddr>().unwrap(),
-                    )
-                    .ok()?,
-                ),
+                smol::future::block_on(UdpSocket::bind(
+                    format!("0.0.0.0:{}", port).parse::<SocketAddr>().unwrap(),
+                ))
+                .ok()?,
                 smol::future::block_on(TcpListener::bind(format!("0.0.0.0:{}", port))).ok()?,
             ))
         })
@@ -178,43 +187,106 @@ async fn manage_exit_inner(
     log::info!(
         "forward to {} from local address {}",
         exit.hostname,
-        local_udp.get_ref().local_addr().unwrap()
+        local_udp.local_addr().unwrap()
     );
-    let (send_routes, recv_routes) = flume::bounded(0);
-    let manage_fut = async {
-        loop {
-            let mut saddr = local_udp.get_ref().local_addr().unwrap();
-            saddr.set_ip(ip.into());
-            if let Err(err) =
-                manage_exit_once(&exit, &bridge_secret, &bridge_group, saddr, &send_routes).await
-            {
-                log::warn!(
-                    "restarting manage_exit_once for {}: {:?}",
-                    exit.hostname,
-                    err
-                );
+    let bridge_secret = blake3::hash(bridge_secret.as_bytes());
+    let transport = BridgeExitTransport::new(*bridge_secret.as_bytes(), exit_addr);
+    let client = BridgeExitClient(transport);
+    let mut current: Option<(SocketAddr, Forwarder)> = None;
+    loop {
+        match client
+            .advertise_raw(
+                LegacyProtocol::Udp,
+                SocketAddr::new((*MY_IP).into(), local_udp.local_addr().unwrap().port()),
+                bridge_group.as_str().into(),
+            )
+            .await
+        {
+            Ok(resp) => {
+                let resp: SocketAddr = resp;
+                let to_replace = if let Some(current) = current.as_ref() {
+                    current.0 != resp
+                } else {
+                    true
+                };
+                if to_replace {
+                    current = Some((
+                        resp,
+                        Forwarder::new(
+                            bridge_group.clone(),
+                            local_udp.clone(),
+                            local_tcp.clone(),
+                            resp,
+                            resp,
+                            iptables,
+                        ),
+                    ))
+                }
+            }
+            Err(err) => {
+                log::error!("cannot advertise: {:?}", err)
             }
         }
-    };
-    let route_fut = async {
-        // command for route delete
-        let mut forwarder: Option<Forwarder> = None;
-        let mut last_remote_port = 0;
-        loop {
-            let (remote_port, _) = recv_routes.recv_async().await?;
-            let remote_addr = resolve(format!("{}:{}", exit.hostname, remote_port)).await?[0];
-            if remote_port != last_remote_port {
-                last_remote_port = remote_port;
-                forwarder.replace(Forwarder::new(
-                    local_udp.clone(),
-                    local_tcp.clone(),
-                    remote_addr,
-                    iptables,
-                ));
+        smol::Timer::after(Duration::from_secs(10)).await;
+    }
+}
+
+async fn manage_exit_inner_v2(
+    exit: ExitDescriptor,
+    bridge_secret: String,
+    bridge_group: String,
+    iptables: bool,
+) -> anyhow::Result<()> {
+    let exit_addr = resolve(format!("{}:28080", exit.hostname)).await?[0];
+    let bridge_secret = blake3::hash(bridge_secret.as_bytes());
+    let transport = BridgeExitTransport::new(*bridge_secret.as_bytes(), exit_addr);
+    let client = BridgeExitClient(transport);
+
+    let udp_listener = UdpSocket::bind("0.0.0.0:0").await?;
+    let tcp_listener = TcpListener::bind("0.0.0.0:0").await?;
+    log::info!("V2 forward to {}", exit.hostname);
+    // the easiest way of implementing this lol
+    let mut forwarders: HashMap<(SocketAddr, SocketAddr), Arc<Forwarder>> = HashMap::new();
+    loop {
+        let fallible = async {
+            let udp_remote = client
+                .advertise_raw_v2(
+                    "sosistab2-obfsudp".into(),
+                    SocketAddr::new((*MY_IP).into(), udp_listener.local_addr()?.port()),
+                    bridge_group.as_str().into(),
+                )
+                .await?;
+            let tcp_remote = client
+                .advertise_raw_v2(
+                    "sosistab2-obfstls".into(),
+                    SocketAddr::new((*MY_IP).into(), tcp_listener.local_addr()?.port()),
+                    bridge_group.as_str().into(),
+                )
+                .await?;
+            anyhow::Ok((udp_remote, tcp_remote))
+        };
+        match fallible.await {
+            Ok((udp_remote, tcp_remote)) => {
+                let key = (udp_remote, tcp_remote);
+                if !forwarders.contains_key(&key) {
+                    let forwarder = Forwarder::new(
+                        bridge_group.clone(),
+                        udp_listener.clone(),
+                        tcp_listener.clone(),
+                        udp_remote,
+                        tcp_remote,
+                        iptables,
+                    );
+                    forwarders.clear();
+                    forwarders.insert(key, forwarder.into());
+                }
+            }
+            Err(err) => {
+                log::warn!("error managing: {:?}", err)
             }
         }
-    };
-    smol::future::race(manage_fut, route_fut).await
+        smol::Timer::after(Duration::from_secs_f64(fastrand::f64() * 30.0)).await;
+    }
 }
 
 fn run_command(s: &str) {
@@ -226,56 +298,20 @@ fn run_command(s: &str) {
         .unwrap();
 }
 
-async fn get_ip() -> anyhow::Result<Ipv4Addr> {
-    smol::unblock(|| {
-        Ok(ureq::get("http://checkip.amazonaws.com/")
-            .timeout(Duration::from_secs(1))
-            .call()?
-            .into_string()?
-            .trim()
-            .to_string()
-            .parse()?)
-    })
-    .await
-}
+static MY_IP: Lazy<Ipv4Addr> = Lazy::new(|| {
+    ureq::get("http://checkip.amazonaws.com/")
+        .timeout(Duration::from_secs(1))
+        .call()
+        .unwrap()
+        .into_string()
+        .unwrap()
+        .trim()
+        .to_string()
+        .parse()
+        .unwrap()
+});
 
 #[cached::proc_macro::cached(result = true, time = 60)]
 async fn resolve(string: String) -> anyhow::Result<Vec<SocketAddr>> {
     Ok(smol::net::resolve(string).await?)
-}
-
-async fn manage_exit_once(
-    exit: &ExitDescriptor,
-    bridge_secret: &str,
-    bridge_group: &str,
-    my_addr: SocketAddr,
-    route_update: &flume::Sender<(u16, x25519_dalek::PublicKey)>,
-) -> anyhow::Result<()> {
-    let mut conn =
-        smol::net::TcpStream::connect(resolve(format!("{}:28080", exit.hostname)).await?[0])
-            .await
-            .context("cannot connect to control port")?;
-    // first read the challenge string
-    let mut challenge_string = [0u8; 32];
-    conn.read_exact(&mut challenge_string).await?;
-    // compute the challenge response
-    let challenge_response = blake3::keyed_hash(&challenge_string, bridge_secret.as_bytes());
-    conn.write_all(challenge_response.as_bytes()).await?;
-    // enter the main loop
-    loop {
-        // send address and group
-        geph4_aioutils::write_pascalish(&mut conn, &(my_addr, bridge_group)).await?;
-        // receive route
-        let (port, sosistab_pk): (u16, x25519_dalek::PublicKey) =
-            geph4_aioutils::read_pascalish(&mut conn).await?;
-        // log::info!(
-        //     "route at {} is {}/{}",
-        //     exit.hostname,
-        //     port,
-        //     hex::encode(sosistab_pk.as_bytes())
-        // );
-        // update route
-        route_update.send_async((port, sosistab_pk)).await?;
-        smol::Timer::after(Duration::from_secs(30)).await;
-    }
 }
