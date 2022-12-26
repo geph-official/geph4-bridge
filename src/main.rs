@@ -17,12 +17,14 @@ use geph4_binder_transport::{BinderClient, BinderRequestData, BinderResponse, Ex
 use geph4_protocol::bridge_exit::BridgeExitTransport;
 
 use once_cell::sync::Lazy;
+use rand::prelude::*;
 use smol::{
     future::FutureExt,
     net::{TcpListener, TcpStream, UdpSocket},
 };
 use smol_timeout::TimeoutExt;
 use std::time::Duration;
+use stdcode::StdcodeSerializeExt;
 use structopt::StructOpt;
 
 use crate::forward::Forwarder;
@@ -165,14 +167,19 @@ async fn manage_exit(
     }
 }
 
+static UNIQUE_ID: Lazy<u128> = Lazy::new(|| rand::thread_rng().gen());
+
 async fn manage_exit_inner(
     exit: ExitDescriptor,
     bridge_secret: String,
     bridge_group: String,
     iptables: bool,
 ) -> anyhow::Result<()> {
+    let mut rng = rand::rngs::StdRng::from_seed(
+        *blake3::hash(&(&exit, &bridge_secret, &bridge_group, *UNIQUE_ID).stdcode()).as_bytes(),
+    );
     let exit_addr = resolve(format!("{}:28080", exit.hostname)).await?[0];
-    let (local_udp, local_tcp) = std::iter::from_fn(|| Some(fastrand::u32(1000..65536)))
+    let (local_udp, local_tcp) = std::iter::from_fn(|| Some(rng.gen_range(1000..65536)))
         .find_map(|port| {
             log::warn!("trying port {}", port);
             Some((
@@ -219,6 +226,7 @@ async fn manage_exit_inner(
                             resp,
                             resp,
                             iptables,
+                            false,
                         ),
                     ))
                 }
@@ -237,13 +245,27 @@ async fn manage_exit_inner_v2(
     bridge_group: String,
     iptables: bool,
 ) -> anyhow::Result<()> {
+    let mut rng = rand::rngs::StdRng::from_seed(
+        *blake3::hash(&(&exit, &bridge_secret, &bridge_group, *UNIQUE_ID).stdcode()).as_bytes(),
+    );
     let exit_addr = resolve(format!("{}:28080", exit.hostname)).await?[0];
     let bridge_secret = blake3::hash(bridge_secret.as_bytes());
     let transport = BridgeExitTransport::new(*bridge_secret.as_bytes(), exit_addr);
     let client = BridgeExitClient(transport);
 
-    let udp_listener = UdpSocket::bind("0.0.0.0:0").await?;
-    let tcp_listener = TcpListener::bind("0.0.0.0:0").await?;
+    let udp_listener = loop {
+        if let Ok(bound) = UdpSocket::bind(format!("0.0.0.0:{}", rng.gen_range(1000..60000))).await
+        {
+            break bound;
+        }
+    };
+    let tcp_listener = loop {
+        if let Ok(bound) =
+            TcpListener::bind(format!("0.0.0.0:{}", rng.gen_range(1000..60000))).await
+        {
+            break bound;
+        }
+    };
     log::info!("V2 forward to {}", exit.hostname);
     // the easiest way of implementing this lol
     let mut forwarders: HashMap<(SocketAddr, SocketAddr), Arc<Forwarder>> = HashMap::new();
@@ -276,6 +298,7 @@ async fn manage_exit_inner_v2(
                         udp_remote,
                         tcp_remote,
                         iptables,
+                        false,
                     );
                     forwarders.clear();
                     forwarders.insert(key, forwarder.into());

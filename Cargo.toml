@@ -51,6 +51,8 @@ eff-wordlist = "1.0.2"
 native-tls = "0.2.10"
 async-native-tls = "0.4.0"
 arrayref = "0.3.6"
+rand = "0.8.5"
+stdcode = "0.1.13"
 
 [profile.release]
 panic = "abort"

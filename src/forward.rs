@@ -48,14 +48,17 @@ impl Forwarder {
         remote_addr_udp: SocketAddr,
         remote_addr_tcp: SocketAddr,
         iptables: bool,
+        disable_udp: bool,
     ) -> Self {
         if iptables {
-            run_command(&format!(
+            if !disable_udp {
+                run_command(&format!(
                 "iptables -t nat -A PREROUTING -p udp --dport {} -j DNAT --to-destination {}:{}; ",
                 local_udp.local_addr().unwrap().port(),
                 remote_addr_udp.ip(),
                 remote_addr_udp.port(),
             ));
+            }
             run_command(&format!(
                 "iptables -t nat -A PREROUTING -p tcp --dport {} -j DNAT --to-destination {}:{}; ",
                 local_tcp.local_addr().unwrap().port(),
@@ -64,7 +67,11 @@ impl Forwarder {
             ));
         }
         let tcp_task = smolscale::spawn(tcp_forward(local_tcp.clone(), remote_addr_tcp));
-        let udp_task = smolscale::spawn(udp_forward(local_udp.clone(), remote_addr_udp));
+        let udp_task = if disable_udp {
+            smolscale::spawn(smol::future::pending())
+        } else {
+            smolscale::spawn(udp_forward(local_udp.clone(), remote_addr_udp))
+        };
         // let udp_task = smolscale::spawn(smol::future::pending());
         Self {
             local_udp,
