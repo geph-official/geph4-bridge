@@ -8,21 +8,22 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::Context;
-
-use async_compat::CompatExt;
 use env_logger::Env;
-use geph4_binder_transport::{BinderClient, BinderRequestData, BinderResponse, ExitDescriptor};
 
-use geph4_protocol::bridge_exit::BridgeExitTransport;
+use geph4_protocol::{
+    binder::{
+        client::E2eeHttpTransport,
+        protocol::{BinderClient, ExitDescriptor},
+    },
+    bridge_exit::BridgeExitTransport,
+};
 
 use once_cell::sync::Lazy;
 use rand::prelude::*;
 use smol::{
     future::FutureExt,
-    net::{TcpListener, TcpStream, UdpSocket},
+    net::{TcpListener, UdpSocket},
 };
-use smol_timeout::TimeoutExt;
 use std::time::Duration;
 use stdcode::StdcodeSerializeExt;
 use structopt::StructOpt;
@@ -32,7 +33,7 @@ use geph4_protocol::bridge_exit::{BridgeExitClient, LegacyProtocol};
 
 #[derive(Debug, StructOpt)]
 struct Opt {
-    #[structopt(long, default_value = "https://binder-v4.geph.io")]
+    #[structopt(long, default_value = "https://binder-v4.geph.io/next-gen")]
     /// HTTP(S) address of the binder
     binder_http: String,
 
@@ -59,40 +60,30 @@ struct Opt {
     // additional_ip: Vec<Ipv4Addr>,
 }
 
-async fn panic_if_gfw() {
-    TcpStream::connect("10010.com:80")
-        .timeout(Duration::from_secs(10))
-        .await
-        .context("timeout")
-        .expect("GFW test failed from timeout")
-        .expect("GFW test failed for other reason");
-    log::debug!("Not gfwed...");
-}
-
 fn main() {
     let opt: Opt = Opt::from_args();
     // start the autoupdate thread
     std::thread::spawn(autoupdate::autoupdate);
 
     smol::block_on(async move {
-        // check for GFW
-        panic_if_gfw().compat().await;
         env_logger::Builder::from_env(Env::default().default_filter_or("geph4_bridge")).init();
         if opt.iptables {
             run_command("iptables -t nat -F");
             run_command("iptables -t mangle -F");
             // --random to not leak origin ports
-            run_command("iptables -t nat -A POSTROUTING -j MASQUERADE -p udp --random-fully");
-            run_command("iptables -t nat -A POSTROUTING -j MASQUERADE -p tcp --random-fully");
+            run_command("iptables -t nat -A POSTROUTING -j MASQUERADE -p udp");
+            run_command("iptables -t nat -A POSTROUTING -j MASQUERADE -p tcp");
         }
         // // set TTL to hide distance between this and the exit in order to be better obfuscate
-        run_command("iptables -t mangle -p udp -I POSTROUTING -j TTL --ttl-set 64");
-        let binder_client = Arc::new(geph4_binder_transport::HttpClient::new(
-            bincode::deserialize(&hex::decode(opt.binder_master_pk)?)?,
-            opt.binder_http,
-            &[],
-            None,
-        ));
+        run_command("iptables -t mangle -p udp -I POSTROUTING -j TTL --ttl-set 200");
+        let binder_client = Arc::new(BinderClient::from(E2eeHttpTransport::new(
+            bincode::deserialize(
+                &hex::decode(&opt.binder_master_pk).expect("invalid hex in binder pk"),
+            )
+            .expect("invalid format of master binder pk"),
+            opt.binder_http.clone(),
+            vec![],
+        )));
         bridge_loop(
             binder_client,
             &opt.bridge_secret,
@@ -109,7 +100,7 @@ fn main() {
 ///
 /// We poll the binder for a list of exits, and maintain a list of actor-like "exit manager" tasks that each manage a control-protocol connection.
 async fn bridge_loop<'a>(
-    binder_client: Arc<dyn BinderClient>,
+    binder_client: Arc<BinderClient>,
     bridge_secret: &'a str,
     bridge_group: &'a str,
     iptables: bool,
@@ -117,11 +108,12 @@ async fn bridge_loop<'a>(
     let mut current_exits = HashMap::new();
     loop {
         let binder_client = binder_client.clone();
-        let exits = binder_client.request(BinderRequestData::GetExits).await;
-        if let Ok(BinderResponse::GetExitsResp(exits)) = exits {
+        let summary = binder_client.get_summary().await;
+        if let Ok(summary) = summary {
+            let exits = summary.exits;
             log::info!("got {} exits!", exits.len());
             // insert all exits that aren't in current exit
-            let binder_exits: HashSet<_> = exits.iter().map(|e| e.hostname.to_string()).collect();
+            let binder_exits: HashSet<_> = exits.iter().map(|e| e.hostname.clone()).collect();
             current_exits.retain(|k, _| binder_exits.contains(k));
             for exit in exits {
                 if current_exits.get(&exit.hostname).is_none() {
@@ -149,95 +141,19 @@ async fn manage_exit(
     iptables: bool,
 ) {
     loop {
-        let v1 = manage_exit_inner(
-            exit.clone(),
-            bridge_secret.clone(),
-            bridge_group.clone(),
-            iptables,
-        );
         let v2 = manage_exit_inner_v2(
             exit.clone(),
             bridge_secret.clone(),
             bridge_group.clone(),
             iptables,
         );
-        if let Err(err) = v1.race(v2).await {
+        if let Err(err) = v2.await {
             log::error!("manage_exit_inner: {:?}", err)
         }
     }
 }
 
 static UNIQUE_ID: Lazy<u128> = Lazy::new(|| rand::thread_rng().gen());
-
-async fn manage_exit_inner(
-    exit: ExitDescriptor,
-    bridge_secret: String,
-    bridge_group: String,
-    iptables: bool,
-) -> anyhow::Result<()> {
-    let mut rng = rand::rngs::StdRng::from_seed(
-        *blake3::hash(&(&exit, &bridge_secret, &bridge_group, *UNIQUE_ID).stdcode()).as_bytes(),
-    );
-    let exit_addr = resolve(format!("{}:28080", exit.hostname)).await?[0];
-    let (local_udp, local_tcp) = std::iter::from_fn(|| Some(rng.gen_range(1000..65536)))
-        .find_map(|port| {
-            log::warn!("trying port {}", port);
-            Some((
-                smol::future::block_on(UdpSocket::bind(
-                    format!("0.0.0.0:{}", port).parse::<SocketAddr>().unwrap(),
-                ))
-                .ok()?,
-                smol::future::block_on(TcpListener::bind(format!("0.0.0.0:{}", port))).ok()?,
-            ))
-        })
-        .unwrap();
-    log::info!(
-        "forward to {} from local address {}",
-        exit.hostname,
-        local_udp.local_addr().unwrap()
-    );
-    let bridge_secret = blake3::hash(bridge_secret.as_bytes());
-    let transport = BridgeExitTransport::new(*bridge_secret.as_bytes(), exit_addr);
-    let client = BridgeExitClient(transport);
-    let mut current: Option<(SocketAddr, Forwarder)> = None;
-    loop {
-        match client
-            .advertise_raw(
-                LegacyProtocol::Udp,
-                SocketAddr::new((*MY_IP).into(), local_udp.local_addr().unwrap().port()),
-                bridge_group.as_str().into(),
-            )
-            .await
-        {
-            Ok(resp) => {
-                let resp: SocketAddr = resp;
-                let to_replace = if let Some(current) = current.as_ref() {
-                    current.0 != resp
-                } else {
-                    true
-                };
-                if to_replace {
-                    current = Some((
-                        resp,
-                        Forwarder::new(
-                            bridge_group.clone(),
-                            local_udp.clone(),
-                            local_tcp.clone(),
-                            resp,
-                            resp,
-                            iptables,
-                            false,
-                        ),
-                    ))
-                }
-            }
-            Err(err) => {
-                log::error!("cannot advertise: {:?}", err)
-            }
-        }
-        smol::Timer::after(Duration::from_secs(10)).await;
-    }
-}
 
 async fn manage_exit_inner_v2(
     exit: ExitDescriptor,

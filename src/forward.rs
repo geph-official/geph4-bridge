@@ -1,8 +1,8 @@
 use by_address::ByAddress;
-use byteorder::{ByteOrder, NetworkEndian, ReadBytesExt};
-use rcgen::generate_simple_self_signed;
+
+
 use smol::net::{TcpListener, TcpStream};
-use smol::{io::BufReader, net::UdpSocket, prelude::*};
+use smol::{net::UdpSocket, prelude::*};
 use std::{net::SocketAddr, sync::Arc};
 
 use crate::{nat::NatTable, run_command};
@@ -99,45 +99,12 @@ async fn tcp_forward(local_tcp: TcpListener, remote_addr: SocketAddr) {
                 Ok(remote) => {
                     remote.set_nodelay(true)?;
                     // PEEK at the client
-                    let mut client_up = BufReader::with_capacity(65536, client.clone());
-                    let initial = client_up.fill_buf().await?;
-                    // Checks to see whether the initial bit looks like a clienthello at all
-                    let is_tls = guess_client_hello(initial).is_ok();
-                    if !is_tls {
-                        log::debug!("PLAIN {} <=> {}", client.peer_addr()?, remote.peer_addr()?);
-                        // two-way copy
-                        let upload =
-                            geph4_aioutils::copy_with_stats(client_up, remote.clone(), |_| ());
-                        let download = geph4_aioutils::copy_with_stats(remote, client, |_| ());
-                        let _ = upload.race(download).await;
-                    } else {
-                        log::debug!("TLS {} <=> {}", client.peer_addr()?, remote.peer_addr()?);
-                        let composite = CompositeReadWrite {
-                            reader: client_up,
-                            writer: client,
-                        };
-                        let names = vec![format!(
-                            "{}{}.com",
-                            eff_wordlist::large::random_word(),
-                            eff_wordlist::large::random_word()
-                        )];
-                        let cert = generate_simple_self_signed(names)?;
-                        let cert_pem = cert.serialize_pem()?;
-                        let cert_key = cert.serialize_private_key_pem();
-                        let identity = native_tls::Identity::from_pkcs8(
-                            cert_pem.as_bytes(),
-                            cert_key.as_bytes(),
-                        )
-                        .expect("wtf cannot decode id???");
-                        let acceptor: async_native_tls::TlsAcceptor =
-                            native_tls::TlsAcceptor::new(identity)?.into();
-                        let client = acceptor.accept(composite).await?;
-                        let client = async_dup::Arc::new(async_dup::Mutex::new(client));
-                        let upload =
-                            geph4_aioutils::copy_with_stats(client.clone(), remote.clone(), |_| ());
-                        let download = geph4_aioutils::copy_with_stats(remote, client, |_| ());
-                        let _ = upload.race(download).await;
-                    }
+                    log::debug!("PLAIN {} <=> {}", client.peer_addr()?, remote.peer_addr()?);
+                    // two-way copy
+                    let upload =
+                        geph4_aioutils::copy_with_stats(client.clone(), remote.clone(), |_| ());
+                    let download = geph4_aioutils::copy_with_stats(remote, client, |_| ());
+                    let _ = upload.race(download).await;
                 }
             }
             anyhow::Ok(())
@@ -189,41 +156,6 @@ impl<R, W: AsyncWrite> AsyncWrite for CompositeReadWrite<R, W> {
     }
 }
 
-fn guess_client_hello<R: std::io::Read>(mut reader: R) -> std::io::Result<()> {
-    // skip the first 5 bytes (the header for the container containing the clienthello)
-    for _ in 0..5 {
-        reader.read_u8()?;
-    }
-    // Handshake message type.
-    const HANDSHAKE_TYPE_CLIENT_HELLO: u8 = 1;
-    let typ = reader.read_u8()?;
-    if typ != HANDSHAKE_TYPE_CLIENT_HELLO {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "handshake message not a ClientHello (type {}, expected {})",
-                typ, HANDSHAKE_TYPE_CLIENT_HELLO
-            ),
-        ));
-    }
-    // Handshake message length.
-    let len = read_u24(&mut reader)?;
-    if len < 10000 {
-        Ok(())
-    } else {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "bad length lol",
-        ))
-    }
-}
-
-fn read_u24<R: std::io::Read>(mut reader: R) -> std::io::Result<u32> {
-    let mut buf = [0; 3];
-    reader
-        .read_exact(&mut buf)
-        .map(|_| NetworkEndian::read_u24(&buf))
-}
 
 // the tricky part: UDP natting
 async fn udp_forward(local_udp: UdpSocket, remote_addr: SocketAddr) {
