@@ -165,6 +165,7 @@ async fn manage_exit_inner_v2(
         *blake3::hash(&(&exit, &bridge_secret, &bridge_group, *UNIQUE_ID).stdcode()).as_bytes(),
     );
     let exit_addr = resolve(format!("{}:28080", exit.hostname)).await?[0];
+    log::debug!("bridge secret prehash {:?}", bridge_secret);
     let bridge_secret = blake3::hash(bridge_secret.as_bytes());
     log::debug!("bridge secret {:?}", bridge_secret);
     let transport = BridgeExitTransport::new(*bridge_secret.as_bytes(), exit_addr);
