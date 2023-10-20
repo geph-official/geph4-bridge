@@ -8,6 +8,7 @@ use std::{
     sync::Arc,
 };
 
+use either::Either;
 use env_logger::Env;
 
 use geph4_protocol::{
@@ -61,11 +62,12 @@ struct Opt {
 }
 
 fn main() {
+    smolscale::permanently_single_threaded();
     let opt: Opt = Opt::from_args();
     // start the autoupdate thread
     std::thread::spawn(autoupdate::autoupdate);
 
-    smol::block_on(async move {
+    smolscale::block_on(async move {
         env_logger::Builder::from_env(Env::default().default_filter_or("geph4_bridge")).init();
         if opt.iptables {
             run_command("iptables -t nat -F");
@@ -146,6 +148,7 @@ async fn manage_exit(
             bridge_secret.clone(),
             bridge_group.clone(),
             iptables,
+            Protocol::Tcp,
         );
         if let Err(err) = v2.await {
             log::error!("manage_exit_inner: {:?}", err)
@@ -153,73 +156,79 @@ async fn manage_exit(
     }
 }
 
-static UNIQUE_ID: Lazy<u128> = Lazy::new(|| rand::thread_rng().gen());
+#[derive(Clone, Copy)]
+pub enum Protocol {
+    Tcp,
+    Udp,
+}
 
+static UNIQUE_ID: Lazy<u128> = Lazy::new(|| rand::thread_rng().gen());
 async fn manage_exit_inner_v2(
     exit: ExitDescriptor,
     bridge_secret: String,
     bridge_group: String,
     iptables: bool,
+    protocol: Protocol,
 ) -> anyhow::Result<()> {
     let mut rng = rand::rngs::StdRng::from_seed(
         *blake3::hash(&(&exit, &bridge_secret, &bridge_group, *UNIQUE_ID).stdcode()).as_bytes(),
     );
     let exit_addr = resolve(format!("{}:28080", exit.hostname)).await?[0];
     log::debug!("bridge secret prehash {:?}", bridge_secret);
-    let bridge_secret = blake3::hash(bridge_secret.as_bytes());
+    let bridge_secret = blake3::hash(dbg!(bridge_secret.as_bytes()));
     log::debug!("bridge secret {:?}", bridge_secret);
     let transport = BridgeExitTransport::new(*bridge_secret.as_bytes(), exit_addr);
     let client = BridgeExitClient(transport);
 
-    let udp_listener = loop {
-        if let Ok(bound) = UdpSocket::bind(format!("0.0.0.0:{}", rng.gen_range(1000..60000))).await
-        {
-            break bound;
+    let (listener, advertise_protocol): (Either<UdpSocket, TcpListener>, String) = match protocol {
+        Protocol::Udp => {
+            let udp_listener = loop {
+                if let Ok(bound) =
+                    UdpSocket::bind(format!("0.0.0.0:{}", rng.gen_range(1000..60000))).await
+                {
+                    break bound;
+                }
+            };
+            (Either::Left(udp_listener), "sosistab2-obfsudp".into())
+        }
+        Protocol::Tcp => {
+            let tcp_listener = loop {
+                if let Ok(bound) =
+                    TcpListener::bind(format!("0.0.0.0:{}", rng.gen_range(1000..60000))).await
+                {
+                    break bound;
+                }
+            };
+            (Either::Right(tcp_listener), "sosistab2-obfstls".into())
         }
     };
-    let tcp_listener = loop {
-        if let Ok(bound) =
-            TcpListener::bind(format!("0.0.0.0:{}", rng.gen_range(1000..60000))).await
-        {
-            break bound;
-        }
-    };
+
     log::info!("V2 forward to {}", exit.hostname);
-    // the easiest way of implementing this lol
-    let mut forwarders: HashMap<(SocketAddr, SocketAddr), Arc<Forwarder>> = HashMap::new();
+    let mut forwarders: HashMap<SocketAddr, Arc<Forwarder>> = HashMap::new();
     loop {
         let fallible = async {
-            let udp_remote = client
+            let remote = client
                 .advertise_raw_v2(
-                    "sosistab2-obfsudp".into(),
-                    SocketAddr::new((*MY_IP).into(), udp_listener.local_addr()?.port()),
+                    advertise_protocol.clone().into(),
+                    SocketAddr::new(
+                        (*MY_IP).into(),
+                        match &listener {
+                            Either::Left(p) => p.local_addr()?,
+                            Either::Right(p) => p.local_addr()?,
+                        }
+                        .port(),
+                    ),
                     bridge_group.as_str().into(),
                 )
                 .await?;
-            let tcp_remote = client
-                .advertise_raw_v2(
-                    "sosistab2-obfstls".into(),
-                    SocketAddr::new((*MY_IP).into(), tcp_listener.local_addr()?.port()),
-                    bridge_group.as_str().into(),
-                )
-                .await?;
-            anyhow::Ok((udp_remote, tcp_remote))
+            anyhow::Ok(remote)
         };
         match fallible.await {
-            Ok((udp_remote, tcp_remote)) => {
-                let key = (udp_remote, tcp_remote);
-                if !forwarders.contains_key(&key) {
-                    let forwarder = Forwarder::new(
-                        bridge_group.clone(),
-                        udp_listener.clone(),
-                        tcp_listener.clone(),
-                        udp_remote,
-                        tcp_remote,
-                        iptables,
-                        false,
-                    );
+            Ok(remote) => {
+                if !forwarders.contains_key(&remote) {
+                    let forwarder = Forwarder::new(protocol, listener.clone(), remote, iptables);
                     forwarders.clear();
-                    forwarders.insert(key, forwarder.into());
+                    forwarders.insert(remote, forwarder.into());
                 }
             }
             Err(err) => {

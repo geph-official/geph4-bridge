@@ -28,8 +28,7 @@ ureq = "2.4.0"
 flume = "0.10.12"
 once_cell = "1.10.0"
 fastrand= "1.7.0"
-# aioutils={path="../lib/aioutils"}
-smolscale= "0.3.23"
+smolscale = "0.4"
 bimap= "0.6.2"
 by_address= "1.0.4"
 parking_lot= "0.12.0"
@@ -50,6 +49,7 @@ byteorder = "1.4.3"
 arrayref = "0.3.6"
 rand = "0.8.5"
 stdcode = "0.1.13"
+either = "1.9.0"
 
 [profile.release]
 panic = "abort"

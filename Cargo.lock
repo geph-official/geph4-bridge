@@ -1155,9 +1155,9 @@ dependencies = [
 
 [[package]]
 name = "either"
-version = "1.8.1"
+version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7fcaabb2fef8c910e7f4c7ce9f67a1283a1715879a7c230ca9d6d1ae31f16d91"
+checksum = "a26ae43d7bcc3b814de94796a5e736d4029efb0ee900c12e2d54c993ad1a1e07"
 
 [[package]]
 name = "encoding_rs"
@@ -1541,6 +1541,7 @@ dependencies = [
  "byteorder",
  "cached 0.34.1",
  "ed25519-dalek",
+ "either",
  "env_logger 0.9.3",
  "fastrand",
  "flume",
@@ -1556,7 +1557,7 @@ dependencies = [
  "smallvec",
  "smol",
  "smol-timeout",
- "smolscale",
+ "smolscale 0.4.0",
  "stdcode",
  "structopt",
  "tap",
@@ -1611,7 +1612,7 @@ dependencies = [
  "smol",
  "smol-timeout",
  "smol_str",
- "smolscale",
+ "smolscale 0.3.52",
  "stdcode",
  "strsim 0.10.0",
  "tap",
@@ -2180,7 +2181,7 @@ dependencies = [
  "smol",
  "smol-timeout",
  "smol_str",
- "smolscale",
+ "smolscale 0.3.52",
  "thiserror",
 ]
 
@@ -2213,7 +2214,7 @@ dependencies = [
  "serde_json",
  "smol",
  "smol_str",
- "smolscale",
+ "smolscale 0.3.52",
  "stdcode",
  "thiserror",
  "tmelcrypt",
@@ -3682,6 +3683,45 @@ dependencies = [
  "backtrace 0.3.67",
  "cache-padded",
  "concurrent-queue 2.2.0",
+ "crossbeam-deque",
+ "crossbeam-queue",
+ "crossbeam-utils",
+ "dashmap 5.4.0",
+ "event-listener",
+ "fastrand",
+ "flume",
+ "futures-intrusive",
+ "futures-lite",
+ "futures-util",
+ "log",
+ "num_cpus",
+ "once_cell",
+ "parking_lot 0.12.1",
+ "pin-project-lite 0.2.9",
+ "rustc-hash",
+ "scopeguard",
+ "slab",
+ "smallvec",
+ "st3",
+ "tabwriter",
+ "thread_local",
+ "waker-fn",
+]
+
+[[package]]
+name = "smolscale"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f4b0b47c6b6f655e648314e7be0b7fd535dad37d87ecd6d496c28bc839820943"
+dependencies = [
+ "anyhow",
+ "async-channel",
+ "async-executor",
+ "async-global-executor",
+ "async-io",
+ "async-task",
+ "backtrace 0.3.67",
+ "cache-padded",
  "crossbeam-deque",
  "crossbeam-queue",
  "crossbeam-utils",

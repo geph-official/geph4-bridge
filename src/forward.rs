@@ -1,39 +1,53 @@
 use by_address::ByAddress;
 
-
+use either::Either;
 use smol::net::{TcpListener, TcpStream};
 use smol::{net::UdpSocket, prelude::*};
 use std::{net::SocketAddr, sync::Arc};
 
-use crate::{nat::NatTable, run_command};
+use crate::{nat::NatTable, run_command, Protocol};
 
 /// A RAII struct that represents a port forwarder
 pub struct Forwarder {
-    local_udp: UdpSocket,
-    local_tcp: TcpListener,
-    remote_addr_udp: SocketAddr,
-    remote_addr_tcp: SocketAddr,
-
+    protocol: Protocol,
+    local_socket: Either<UdpSocket, TcpListener>,
+    remote_addr: SocketAddr,
     iptables: bool,
-
-    _tcp_task: smol::Task<()>,
-    _udp_task: smol::Task<()>,
+    _task: smol::Task<()>,
 }
 
 impl Drop for Forwarder {
     fn drop(&mut self) {
         if self.iptables {
+            let (protocol, local_port) = match self.protocol {
+                Protocol::Tcp => (
+                    "tcp",
+                    self.local_socket
+                        .as_ref()
+                        .right()
+                        .unwrap()
+                        .local_addr()
+                        .unwrap()
+                        .port(),
+                ),
+                Protocol::Udp => (
+                    "udp",
+                    self.local_socket
+                        .as_ref()
+                        .left()
+                        .unwrap()
+                        .local_addr()
+                        .unwrap()
+                        .port(),
+                ),
+            };
+
             run_command(&format!(
-                "iptables -t nat -D PREROUTING -p udp --dport {} -j DNAT --to-destination {}:{}; ",
-                self.local_udp.local_addr().unwrap().port(),
-                self.remote_addr_udp.ip(),
-                self.remote_addr_udp.port(),
-            ));
-            run_command(&format!(
-                "iptables -t nat -D PREROUTING -p tcp --dport {} -j DNAT --to-destination {}:{}; ",
-                self.local_tcp.local_addr().unwrap().port(),
-                self.remote_addr_tcp.ip(),
-                self.remote_addr_tcp.port(),
+                "iptables -t nat -D PREROUTING -p {} --dport {} -j DNAT --to-destination {}:{}; ",
+                protocol,
+                local_port,
+                self.remote_addr.ip(),
+                self.remote_addr.port(),
             ));
         }
     }
@@ -42,45 +56,61 @@ impl Drop for Forwarder {
 impl Forwarder {
     /// Creates a new forwarder.
     pub fn new(
-        _bridge_group: String,
-        local_udp: UdpSocket,
-        local_tcp: TcpListener,
-        remote_addr_udp: SocketAddr,
-        remote_addr_tcp: SocketAddr,
+        protocol: Protocol,
+        local_socket: Either<UdpSocket, TcpListener>,
+        remote_addr: SocketAddr,
         iptables: bool,
-        disable_udp: bool,
     ) -> Self {
         if iptables {
-            if !disable_udp {
-                run_command(&format!(
-                "iptables -t nat -A PREROUTING -p udp --dport {} -j DNAT --to-destination {}:{}; ",
-                local_udp.local_addr().unwrap().port(),
-                remote_addr_udp.ip(),
-                remote_addr_udp.port(),
-            ));
-            }
+            let (protocol, local_port) = match protocol {
+                Protocol::Tcp => (
+                    "tcp",
+                    local_socket
+                        .as_ref()
+                        .right()
+                        .unwrap()
+                        .local_addr()
+                        .unwrap()
+                        .port(),
+                ),
+                Protocol::Udp => (
+                    "udp",
+                    local_socket
+                        .as_ref()
+                        .left()
+                        .unwrap()
+                        .local_addr()
+                        .unwrap()
+                        .port(),
+                ),
+            };
+
             run_command(&format!(
-                "iptables -t nat -A PREROUTING -p tcp --dport {} -j DNAT --to-destination {}:{}; ",
-                local_tcp.local_addr().unwrap().port(),
-                remote_addr_tcp.ip(),
-                remote_addr_tcp.port(),
+                "iptables -t nat -A PREROUTING -p {} --dport {} -j DNAT --to-destination {}:{}; ",
+                protocol,
+                local_port,
+                remote_addr.ip(),
+                remote_addr.port(),
             ));
         }
-        let tcp_task = smolscale::spawn(tcp_forward(local_tcp.clone(), remote_addr_tcp));
-        let udp_task = if disable_udp {
-            smolscale::spawn(smol::future::pending())
-        } else {
-            smolscale::spawn(udp_forward(local_udp.clone(), remote_addr_udp))
+
+        let task = match protocol {
+            Protocol::Tcp => smolscale::spawn(tcp_forward(
+                local_socket.as_ref().right().unwrap().clone(),
+                remote_addr,
+            )),
+            Protocol::Udp => smolscale::spawn(udp_forward(
+                local_socket.as_ref().left().unwrap().clone(),
+                remote_addr,
+            )),
         };
-        // let udp_task = smolscale::spawn(smol::future::pending());
+
         Self {
-            local_udp,
-            local_tcp,
-            remote_addr_udp,
-            remote_addr_tcp,
+            protocol,
+            local_socket,
+            remote_addr,
             iptables,
-            _tcp_task: tcp_task,
-            _udp_task: udp_task,
+            _task: task,
         }
     }
 }
@@ -155,7 +185,6 @@ impl<R, W: AsyncWrite> AsyncWrite for CompositeReadWrite<R, W> {
         pinned.poll_flush(cx)
     }
 }
-
 
 // the tricky part: UDP natting
 async fn udp_forward(local_udp: UdpSocket, remote_addr: SocketAddr) {
