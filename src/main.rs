@@ -26,11 +26,11 @@ use smol::{
     net::{TcpListener, UdpSocket},
 };
 use std::time::Duration;
-use stdcode::StdcodeSerializeExt;
+
 use structopt::StructOpt;
 
 use crate::forward::Forwarder;
-use geph4_protocol::bridge_exit::{BridgeExitClient, LegacyProtocol};
+use geph4_protocol::bridge_exit::BridgeExitClient;
 
 #[derive(Debug, StructOpt)]
 struct Opt {
@@ -75,6 +75,7 @@ fn main() {
             // --random to not leak origin ports
             run_command("iptables -t nat -A POSTROUTING -j MASQUERADE -p udp");
             run_command("iptables -t nat -A POSTROUTING -j MASQUERADE -p tcp");
+            // run_command("iptables -t mangle -A FORWARD -p tcp -j TCPMSS --set-mss 100");
         }
         // // set TTL to hide distance between this and the exit in order to be better obfuscate
         run_command("iptables -t mangle -p udp -I POSTROUTING -j TTL --ttl-set 200");
@@ -149,7 +150,14 @@ async fn manage_exit(
             bridge_group.clone(),
             iptables,
             Protocol::Tcp,
-        );
+        )
+        .race(manage_exit_inner_v2(
+            exit.clone(),
+            bridge_secret.clone(),
+            bridge_group.clone(),
+            iptables,
+            Protocol::Udp,
+        ));
         if let Err(err) = v2.await {
             log::error!("manage_exit_inner: {:?}", err)
         }
@@ -162,7 +170,6 @@ pub enum Protocol {
     Udp,
 }
 
-static UNIQUE_ID: Lazy<u128> = Lazy::new(|| rand::thread_rng().gen());
 async fn manage_exit_inner_v2(
     exit: ExitDescriptor,
     bridge_secret: String,
@@ -170,9 +177,6 @@ async fn manage_exit_inner_v2(
     iptables: bool,
     protocol: Protocol,
 ) -> anyhow::Result<()> {
-    let mut rng = rand::rngs::StdRng::from_seed(
-        *blake3::hash(&(&exit, &bridge_secret, &bridge_group, *UNIQUE_ID).stdcode()).as_bytes(),
-    );
     let exit_addr = resolve(format!("{}:28080", exit.hostname)).await?[0];
     log::debug!("bridge secret prehash {:?}", bridge_secret);
     let bridge_secret = blake3::hash(dbg!(bridge_secret.as_bytes()));
@@ -183,8 +187,11 @@ async fn manage_exit_inner_v2(
     let (listener, advertise_protocol): (Either<UdpSocket, TcpListener>, String) = match protocol {
         Protocol::Udp => {
             let udp_listener = loop {
-                if let Ok(bound) =
-                    UdpSocket::bind(format!("0.0.0.0:{}", rng.gen_range(1000..60000))).await
+                if let Ok(bound) = UdpSocket::bind(format!(
+                    "0.0.0.0:{}",
+                    rand::thread_rng().gen_range(1000..60000)
+                ))
+                .await
                 {
                     break bound;
                 }
@@ -193,8 +200,11 @@ async fn manage_exit_inner_v2(
         }
         Protocol::Tcp => {
             let tcp_listener = loop {
-                if let Ok(bound) =
-                    TcpListener::bind(format!("0.0.0.0:{}", rng.gen_range(1000..60000))).await
+                if let Ok(bound) = TcpListener::bind(format!(
+                    "0.0.0.0:{}",
+                    rand::thread_rng().gen_range(1000..60000)
+                ))
+                .await
                 {
                     break bound;
                 }
