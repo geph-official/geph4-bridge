@@ -3,7 +3,7 @@ use by_address::ByAddress;
 use either::Either;
 use smol::net::{TcpListener, TcpStream};
 use smol::{net::UdpSocket, prelude::*};
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use crate::{nat::NatTable, run_command, Protocol};
 
@@ -42,13 +42,15 @@ impl Drop for Forwarder {
                 ),
             };
 
-            run_command(&format!(
+            if protocol == "udp" {
+                run_command(&format!(
                 "iptables -t nat -D PREROUTING -p {} --dport {} -j DNAT --to-destination {}:{}; ",
                 protocol,
                 local_port,
                 self.remote_addr.ip(),
                 self.remote_addr.port(),
             ));
+            }
         }
     }
 }
@@ -85,13 +87,15 @@ impl Forwarder {
                 ),
             };
 
-            run_command(&format!(
+            if protocol == "udp" {
+                run_command(&format!(
                 "iptables -t nat -A PREROUTING -p {} --dport {} -j DNAT --to-destination {}:{}; ",
                 protocol,
                 local_port,
                 remote_addr.ip(),
                 remote_addr.port(),
             ));
+            }
         }
 
         let task = match protocol {
@@ -133,13 +137,33 @@ async fn tcp_forward(local_tcp: TcpListener, remote_addr: SocketAddr) {
                     // two-way copy
                     let upload =
                         geph4_aioutils::copy_with_stats(client.clone(), remote.clone(), |_| ());
-                    let download = geph4_aioutils::copy_with_stats(remote, client, |_| ());
+                    let download = copy_fragmented(remote, client);
                     let _ = upload.race(download).await;
                 }
             }
             anyhow::Ok(())
         })
         .detach();
+    }
+}
+
+async fn copy_fragmented(
+    mut reader: impl AsyncRead + Unpin,
+    mut writer: impl AsyncWrite + Unpin,
+) -> std::io::Result<()> {
+    let mut buffer_size = 10usize;
+    loop {
+        let mut buff = vec![0u8; buffer_size];
+        let n = reader.read(&mut buff).await?;
+        if n == 0 {
+            return Ok(());
+        }
+        writer.write_all(&buff[..n]).await?;
+        writer.flush().await?;
+        if buffer_size < 2000 {
+            smol::Timer::after(Duration::from_millis(10)).await;
+        }
+        buffer_size = (buffer_size + 1).min(65536);
     }
 }
 

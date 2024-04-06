@@ -74,7 +74,7 @@ fn main() {
             run_command("iptables -t mangle -F");
             // --random to not leak origin ports
             run_command("iptables -t nat -A POSTROUTING -j MASQUERADE -p udp");
-            run_command("iptables -t nat -A POSTROUTING -j MASQUERADE -p tcp");
+            // run_command("iptables -t nat -A POSTROUTING -j MASQUERADE -p tcp");
             // run_command("iptables -t mangle -A FORWARD -p tcp -j TCPMSS --set-mss 100");
         }
         // // set TTL to hide distance between this and the exit in order to be better obfuscate
